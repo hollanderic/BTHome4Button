@@ -21,12 +21,6 @@ uint32_t power_hal_now_ms();
 bool power_hal_read_button(uint8_t idx);
 
 /**
- * Returns true if button index (0 .. NUM_BUTTONS-1) was latched in GPIO LATCH
- * on wake-up from System OFF.
- */
-bool power_hal_was_button_latched(uint8_t idx);
-
-/**
  * Set status LED on or off.
  */
 void power_hal_set_led(bool on);
@@ -45,15 +39,9 @@ void power_hal_sleep_ms(uint32_t timeout_ms);
 uint8_t power_hal_read_battery_pct();
 
 /**
- * Return the next 8-bit BTHome Packet ID, persisted across System OFF in GPREGRET.
+ * Return the next 8-bit BTHome Packet ID, persisted across resets in GPREGRET.
  */
 uint8_t power_hal_next_packet_id();
-
-/**
- * Configure button wake-up SENSE and enter nRF52832/nRF52840 System OFF (~0.3 uA).
- * Does not return; next button press resets the MCU.
- */
-[[noreturn]] void power_hal_enter_system_off();
 
 #if defined(BOARD_PICOMICRO_NRF52840)
 /**

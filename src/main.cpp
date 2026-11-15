@@ -35,8 +35,7 @@ void setup()
 
     uint8_t battery_pct = power_hal_read_battery_pct();
     ButtonStateMachine buttons[NUM_BUTTONS];
-    uint32_t boot_ms = power_hal_now_ms();
-    bool any_wake_btn = false;
+    bool any_boot_btn = false;
 #if defined(BOARD_PICOMICRO_NRF52840)
     constexpr uint32_t kBootloaderHoldMs = 3000;
     bool dfu_combo_active = false;
@@ -44,17 +43,15 @@ void setup()
 #endif
 
     for (uint8_t i = 0; i < NUM_BUTTONS; ++i) {
-        bool pressed = power_hal_read_button(i);
-        bool latched = power_hal_was_button_latched(i);
-        if (pressed || latched) {
-            buttons[i].on_system_off_wake(boot_ms, pressed);
-            any_wake_btn = true;
+        if (power_hal_read_button(i)) {
+            any_boot_btn = true;
+            break;
         }
     }
 
-    // If booted without any button pressed or latched (e.g. battery insertion or reset),
-    // blink status LED once, send a discovery packet, and enter System OFF.
-    if (!any_wake_btn) {
+    // If booted without any button pressed (e.g. battery insertion or reset),
+    // blink status LED once and send a discovery packet before entering System ON idle sleep.
+    if (!any_boot_btn) {
         power_hal_set_led(true);
         BthomeButtonEvent init_events[NUM_BUTTONS] = {
             BthomeButtonEvent::NONE,
@@ -64,14 +61,12 @@ void setup()
         };
         broadcast_bthome_events(init_events, battery_pct);
         power_hal_set_led(false);
-        power_hal_enter_system_off();
     }
 
     for (;;) {
         uint32_t now_ms = power_hal_now_ms();
         BthomeButtonEvent pending_events[NUM_BUTTONS];
         bool has_event = false;
-        bool all_idle = true;
         uint32_t min_timeout_ms = UINT32_MAX;
 
         for (uint8_t i = 0; i < NUM_BUTTONS; ++i) {
@@ -80,9 +75,6 @@ void setup()
             if (pending_events[i] != BthomeButtonEvent::NONE) {
                 has_event = true;
             }
-            if (!buttons[i].is_idle() || pressed) {
-                all_idle = false;
-            }
             uint32_t t = buttons[i].next_timeout_ms(now_ms);
             if (t < min_timeout_ms) {
                 min_timeout_ms = t;
@@ -90,6 +82,7 @@ void setup()
         }
 
         if (has_event) {
+            battery_pct = power_hal_read_battery_pct();
             power_hal_set_led(true);
             broadcast_bthome_events(pending_events, battery_pct);
             power_hal_set_led(false);
@@ -117,16 +110,13 @@ void setup()
         }
 #endif
 
-        if (all_idle) {
-            power_hal_enter_system_off();
-        }
-
+        // System ON sleep (__WFE): sleeps indefinitely when all buttons are idle (min_timeout_ms == UINT32_MAX)
         power_hal_sleep_ms(min_timeout_ms);
     }
 }
 
 void loop()
 {
-    // Unreachable: setup() always enters System OFF when idle.
+    // Unreachable: setup() loops in System ON sleep.
 }
 

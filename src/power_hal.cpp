@@ -6,7 +6,7 @@ namespace {
 constexpr uint32_t kRtcFreqHz = 1024; // 32768 Hz / (PRESCALER 31 + 1)
 
 volatile bool g_rtc2_fired = false;
-uint32_t g_wake_latch = 0;
+volatile uint32_t g_rtc2_overflows = 0;
 
 void configure_button_pin_input(uint8_t pin, uint32_t sense_mode)
 {
@@ -32,6 +32,10 @@ void arm_button_change_sense()
 
 extern "C" void RTC2_IRQHandler(void)
 {
+    if (NRF_RTC2->EVENTS_OVRFLW) {
+        NRF_RTC2->EVENTS_OVRFLW = 0;
+        ++g_rtc2_overflows;
+    }
     if (NRF_RTC2->EVENTS_COMPARE[0]) {
         NRF_RTC2->EVENTS_COMPARE[0] = 0;
         g_rtc2_fired = true;
@@ -40,9 +44,8 @@ extern "C" void RTC2_IRQHandler(void)
 
 void power_hal_init()
 {
-    // Capture and clear GPIO LATCH before reconfiguring pins
-    g_wake_latch = NRF_P0->LATCH;
-    NRF_P0->LATCH = g_wake_latch;
+    // Clear any stale GPIO LATCH bits
+    NRF_P0->LATCH = NRF_P0->LATCH;
 
 #if BOARD_HAS_DCDC
     NRF_POWER->DCDCEN = POWER_DCDCEN_DCDCEN_Enabled << POWER_DCDCEN_DCDCEN_Pos;
@@ -81,6 +84,9 @@ void power_hal_init()
     NRF_RTC2->PRESCALER = 31; // 32768 / (31 + 1) = 1024 Hz
     NRF_RTC2->INTENCLR = 0xFFFFFFFFUL;
     NRF_RTC2->EVENTS_COMPARE[0] = 0;
+    NRF_RTC2->EVENTS_OVRFLW = 0;
+    g_rtc2_overflows = 0;
+    NRF_RTC2->INTENSET = RTC_INTENSET_OVRFLW_Msk;
     NVIC_ClearPendingIRQ(RTC2_IRQn);
     NVIC_SetPriority(RTC2_IRQn, 3);
     NVIC_EnableIRQ(RTC2_IRQn);
@@ -111,8 +117,16 @@ void power_hal_init()
 
 uint32_t power_hal_now_ms()
 {
-    uint32_t ticks = NRF_RTC2->COUNTER;
-    return static_cast<uint32_t>((static_cast<uint64_t>(ticks) * 1000ULL) / kRtcFreqHz);
+    uint32_t ovf1;
+    uint32_t ticks;
+    uint32_t ovf2;
+    do {
+        ovf1 = g_rtc2_overflows;
+        ticks = NRF_RTC2->COUNTER;
+        ovf2 = g_rtc2_overflows;
+    } while (ovf1 != ovf2);
+    uint64_t total_ticks = (static_cast<uint64_t>(ovf1) << 24) | ticks;
+    return static_cast<uint32_t>((total_ticks * 1000ULL) / kRtcFreqHz);
 }
 
 bool power_hal_read_button(uint8_t idx)
@@ -122,14 +136,6 @@ bool power_hal_read_button(uint8_t idx)
     }
     bool high = ((NRF_P0->IN >> kButtonPins[idx]) & 1UL) != 0;
     return BTN_ACTIVE_LOW ? !high : high;
-}
-
-bool power_hal_was_button_latched(uint8_t idx)
-{
-    if (idx >= NUM_BUTTONS) {
-        return false;
-    }
-    return ((g_wake_latch >> kButtonPins[idx]) & 1UL) != 0;
 }
 
 void power_hal_set_led(bool on)
@@ -163,12 +169,19 @@ void power_hal_sleep_ms(uint32_t timeout_ms)
         NRF_RTC2->EVENTS_COMPARE[0] = 0;
         NRF_RTC2->CC[0] = target;
         NRF_RTC2->INTENSET = RTC_INTENSET_COMPARE0_Msk;
+    } else {
+        // No active timer needed when idle: stop RTC2 to minimize System ON sleep current
+        NRF_RTC2->TASKS_STOP = 1;
     }
 
     while (!NRF_GPIOTE->EVENTS_PORT && !g_rtc2_fired) {
         __SEV();
         __WFE();
         __WFE();
+    }
+
+    if (timeout_ms == UINT32_MAX) {
+        NRF_RTC2->TASKS_START = 1;
     }
 
     NRF_GPIOTE->EVENTS_PORT = 0;
@@ -239,29 +252,6 @@ uint8_t power_hal_next_packet_id()
     NRF_POWER->GPREGRET = next_id;
 #endif
     return next_id;
-}
-
-[[noreturn]] void power_hal_enter_system_off()
-{
-    power_hal_set_led(false);
-
-    NRF_RTC2->TASKS_STOP = 1;
-    NRF_RTC2->INTENCLR = 0xFFFFFFFFUL;
-    NRF_GPIOTE->INTENCLR = 0xFFFFFFFFUL;
-
-    // Arm button pins to wake from System OFF on press
-    uint32_t wake_sense = BTN_ACTIVE_LOW ? GPIO_PIN_CNF_SENSE_Low : GPIO_PIN_CNF_SENSE_High;
-    for (uint8_t i = 0; i < NUM_BUTTONS; ++i) {
-        configure_button_pin_input(kButtonPins[i], wake_sense);
-    }
-
-    NRF_GPIOTE->EVENTS_PORT = 0;
-    NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter << POWER_SYSTEMOFF_SYSTEMOFF_Pos;
-    __DSB();
-
-    for (;;) {
-        __WFE();
-    }
 }
 
 #if defined(BOARD_PICOMICRO_NRF52840)
