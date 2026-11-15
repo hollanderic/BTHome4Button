@@ -1,0 +1,11 @@
+.pio/
+.cache/
+.vscode/
+.DS_Store
+compile_commands.json
+*.elf
+*.hex
+*.zip
+*.bin
+*.o
+*.d
